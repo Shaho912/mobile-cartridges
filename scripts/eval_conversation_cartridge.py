@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Evaluate a conversation cartridge by querying it on a set of questions.
+
+Used to test whether fine-tuned cartridges retain old knowledge (no forgetting)
+after incremental updates.
+
+Usage:
+    python scripts/eval_conversation_cartridge.py \
+        --cartridge-path outputs/conversation/sample_8b_day2.pt \
+        --device cuda:0
+"""
+
+import argparse
+import re
+import sys
+import time
+from pathlib import Path
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from cartridges.config import DEFAULT_HF_MODEL_ID  # noqa: E402
+from cartridges.core import TrainableKVCartridge    # noqa: E402
+
+DAY1_QUESTIONS = [
+    "What is the capital of Zorbia?",
+    "What is the population of Zorbia?",
+    "What is the currency of Zorbia?",
+    "Who is the president of Zorbia?",
+    "What is Zorbia's national sport?",
+]
+
+DAY2_QUESTIONS = [
+    "What is the capital of Blarvia?",
+    "What language do people speak in Blarvia?",
+    "What is Blarvia's main export?",
+]
+
+DAY3_QUESTIONS = [
+    "What is the capital of Glorvia?",
+    "What is the population of Glorvia?",
+    "What is the currency of Glorvia?",
+    "Who leads Glorvia?",
+    "What is Glorvia's main export?",
+]
+
+DAY4_QUESTIONS = [
+    "What is the capital of Threndia?",
+    "What is the population of Threndia?",
+    "What is the currency of Threndia?",
+    "Who is the president of Threndia?",
+    "What is Threndia's main export?",
+]
+
+
+def generate(model, tokenizer, cartridge, question: str, device: str, max_new_tokens: int = 80) -> tuple[str, float]:
+    messages = [{"role": "user", "content": f"/no_think\n{question}"}]
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    input_ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)["input_ids"].to(device)
+
+    t0 = time.perf_counter()
+    with torch.inference_mode():
+        outputs = model(
+            input_ids=input_ids,
+            past_key_values=cartridge.as_cache(model.config),
+            use_cache=True,
+        )
+        past_key_values = outputs.past_key_values
+        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
+
+        generated_ids: list[int] = []
+        eos_token_id = tokenizer.eos_token_id
+        for _ in range(max_new_tokens):
+            token_id = int(next_token.item())
+            generated_ids.append(token_id)
+            if eos_token_id is not None and token_id == eos_token_id:
+                break
+            outputs = model(
+                input_ids=next_token,
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = outputs.past_key_values
+            next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)
+    elapsed = time.perf_counter() - t0
+
+    text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    text = re.sub(r"</think>", "", text).strip()
+    text = re.sub(r"^(Okay[,.].*?\n\n)", "", text, flags=re.DOTALL).strip()
+    return text, elapsed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cartridge-path", required=True)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--max-new-tokens", type=int, default=200)
+    args = parser.parse_args()
+
+    print(f"Loading model: {DEFAULT_HF_MODEL_ID}")
+    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_HF_MODEL_ID)
+    model = AutoModelForCausalLM.from_pretrained(
+        DEFAULT_HF_MODEL_ID,
+        dtype=torch.bfloat16 if args.device.startswith("cuda") else torch.float32,
+        attn_implementation="sdpa",
+    )
+    model.to(args.device)
+    model.eval()
+
+    print(f"Loading cartridge: {args.cartridge_path}")
+    cartridge = TrainableKVCartridge.load(args.cartridge_path, device=args.device)
+    print(f"  {cartridge.num_tokens} slots, {cartridge.num_layers} layers\n")
+
+    sections = [
+        ("DAY 1 QUESTIONS (Zorbia)", DAY1_QUESTIONS),
+        ("DAY 2 QUESTIONS (Blarvia)", DAY2_QUESTIONS),
+        ("DAY 3 QUESTIONS (Glorvia)", DAY3_QUESTIONS),
+        ("DAY 4 QUESTIONS (Threndia)", DAY4_QUESTIONS),
+    ]
+
+    total_time = 0.0
+    total_questions = 0
+    for label, questions in sections:
+        print("=" * 60)
+        print(label)
+        print("=" * 60)
+        for q in questions:
+            answer, elapsed = generate(model, tokenizer, cartridge, q, args.device, args.max_new_tokens)
+            print(f"Q: {q}")
+            print(f"A: {answer}")
+            print(f"   [{elapsed:.2f}s]")
+            print()
+            total_time += elapsed
+            total_questions += 1
+
+    print(f"Total: {total_questions} questions in {total_time:.1f}s "
+          f"({total_time / total_questions:.2f}s/query avg)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
