@@ -22,4 +22,4 @@ Instead of re-prefilling a long context on every query, a compact set of learned
 export CARTRIDGES_HF_MODEL_ID=Qwen/Qwen3-8B
 ```
 
-See `CLAUDE.md` for full workflow, hyperparameters, and experiment commands.
+See the project docs for full workflow, hyperparameters, and experiment commands.
