@@ -52,20 +52,25 @@ def main() -> int:
             for p, t in texts.items()
         }
         kv_eval = spec["kv_eval"]
-        for quant in spec["quants"]:
+        extra = spec.get("extra_group_sizes") or {}
+        variants = [(q, gs) for q in spec["quants"]]
+        variants += [(q, g) for q, sizes in extra.items() for g in sizes if g != gs]
+        for quant, group in variants:
             for p in cfg["patients"]:
-                common = {"model": model_id, "quant": quant, "patient": p}
+                common = {"model": model_id, "quant": quant, "patient": p,
+                          "group_size": None if quant == "bf16" else group}
                 for mode in spec["modes"]:
                     jobs.append({**common, "mode": mode})
                 for slots in spec["slots"]:
                     jobs.append({**common, "mode": "cartridge", "slots": slots,
                                  "slot_tag": f"s{slots}", "kv_eval": kv_eval})
                 for kv in spec["max_slots_kv"]:
-                    m = max_slots_under_budget(model_id, quant, gs, kv, cfg["budget_mb"],
+                    m = max_slots_under_budget(model_id, quant, group, kv, cfg["budget_mb"],
                                                doc_tokens[p])
                     if m["weights_over_budget"]:
                         if p == cfg["patients"][0]:
-                            skipped.append(f"{model_id} {quant}: weights "
+                            label = quant if quant == "bf16" else f"{quant} g{group}"
+                            skipped.append(f"{model_id} {label}: weights "
                                            f"{m['weight_bytes'] / 1e6:.0f} MB >= budget, "
                                            f"no max-slot run ({kv} KV)")
                         continue
@@ -80,6 +85,8 @@ def main() -> int:
     for j in jobs:
         parts = ["--model", j["model"], "--quant", j["quant"], "--mode", j["mode"],
                  "--patient", str(j["patient"])]
+        if j["group_size"]:
+            parts += ["--quant-group-size", str(j["group_size"])]
         if j["mode"] == "cartridge":
             parts += ["--slots", str(j["slots"]), "--slot-tag", j["slot_tag"],
                       "--kv-eval", *j["kv_eval"]]
@@ -91,7 +98,8 @@ def main() -> int:
         print(f"note: {note}")
     for j in jobs:
         if j.get("slot_tag", "").startswith("max"):
-            print(f"max slots: {j['model']} {j['quant']} {j['slot_tag']} p{j['patient']:02d} -> "
+            g = f" g{j['group_size']}" if j["group_size"] else ""
+            print(f"max slots: {j['model']} {j['quant']}{g} {j['slot_tag']} p{j['patient']:02d} -> "
                   f"{j['slots']} ({j['max_binding']})")
     print(f"\n{len(jobs)} jobs -> {jobs_dir / 'manifest.txt'}")
     print(f"sbatch --array=0-{len(jobs) - 1}%{args.concurrency} slurm/size_sweep_array.sbatch")

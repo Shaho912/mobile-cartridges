@@ -132,7 +132,7 @@ def main() -> int:
     parser.add_argument("--kv-eval", nargs="+", default=["bf16"], choices=["bf16", "int8"])
     parser.add_argument("--patient", type=int, required=True)
     parser.add_argument("--quant-group-size", type=int, default=None,
-                        help="Override quant_group_size; results go to <quant>_g<N>/.")
+                        help="Override quant_group_size (quantized runs go to <quant>_g<N>/).")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -141,11 +141,10 @@ def main() -> int:
         parser.error("--slots is required for --mode cartridge")
 
     cfg = load_config(args.config)
-    quant_dir = args.quant
-    if args.quant_group_size and args.quant != "bf16" \
-            and args.quant_group_size != cfg["quant_group_size"]:
+    if args.quant_group_size:
         cfg["quant_group_size"] = args.quant_group_size
-        quant_dir = f"{args.quant}_g{args.quant_group_size}"
+    # Group size is always in the directory name, so changing the default never mixes sizes.
+    quant_dir = args.quant if args.quant == "bf16" else f"{args.quant}_g{cfg['quant_group_size']}"
     tag = args.mode if args.mode != "cartridge" else (args.slot_tag or f"s{args.slots}")
     out = run_dir(cfg, args.model, quant_dir, tag, args.patient)
     result_path = out / "result.json"

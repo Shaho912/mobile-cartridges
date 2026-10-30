@@ -9,7 +9,9 @@ patients: [1, 2, 3, 4, 6]   # p05 skipped: question 4 lists durations as options
 questions_per_patient: 20
 
 # Fake quantization (quantize then dequantize to bf16), applied to all Linear + Embedding weights.
-quant_group_size: 128
+# 64 chosen from the 5-patient Qwen3-0.6B baselines (int4 closed book 0.26 vs 0.17 at 128).
+# Per-model extra_group_sizes adds ablation runs at other sizes.
+quant_group_size: 64
 
 # Teacher for KL distillation. "self" = the same (quantized) model with the full patient
 # record in context. A separate teacher (e.g. Qwen3-8B for Qwen3-0.6B) is future work.
@@ -39,6 +41,7 @@ eval:
 # plus one cartridge run per entry in `slots`. max_slots_kv adds the largest slot count that
 # fits the budget for each listed KV precision (skipped when weights alone exceed the budget).
 # kv_eval: KV storage precisions every cartridge run is evaluated at.
+# extra_group_sizes: {quant: [sizes]} repeats that quant's full grid at each listed group size.
 models:
   - id: Qwen/Qwen3-8B
     quants: [bf16]
@@ -53,6 +56,7 @@ models:
     slots: [128, 256, 512, 1024]
     max_slots_kv: [bf16, int8]
     kv_eval: [bf16, int8]
+    extra_group_sizes: {int4: [128]}
 
   - id: google/gemma-3-270m-it
     quants: [bf16, int8, int4]
