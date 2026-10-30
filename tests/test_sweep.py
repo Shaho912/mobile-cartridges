@@ -98,22 +98,41 @@ def test_int8_kv_roundtrip():
 def _record():
     return {"questions": [
         {"question": "Which drug?", "answer_a": "Aspirin", "answer_b": "Heparin",
-         "answer_c": "Insulin", "answer_d": "Morphine", "answer_e": "None",
+         "answer_c": "Insulin", "answer_d": "Morphine", "answer_e": "Warfarin",
          "correct": "Heparin"},
         {"question": "Odd one?", "answer_a": "x", "answer_b": "y", "answer_c": "z",
          "answer_d": "w", "answer_e": "v", "correct": "not an option"},
     ]}
 
 
-def test_eval_items_and_score():
+def test_eval_items():
     items = eval_items(_record(), 1)
     assert items[0]["correct_letter"] == "B" and items[0]["id"] == "lh_p01_q00"
     assert "B) Heparin" in items[0]["prompt"]
+    assert items[0]["prompt"].endswith("single correct option.")
     assert items[1]["correct_letter"] is None
-    assert score("B) Heparin", items[0]) == {"substring_hit": True, "letter_hit": True}
-    assert score("(B)", items[0]) == {"substring_hit": False, "letter_hit": True}
-    assert score("The answer is heparin.", items[0]) == {"substring_hit": True, "letter_hit": False}
-    assert score("Bleeding risk", items[0])["letter_hit"] is False
-    assert score("The correct answer is: **B) Heparin**", items[0])["letter_hit"] is True
-    assert score("**Correct Answer: A) Aspirin**\n**Incorrect: B)**", items[0])["letter_hit"] is False
-    assert score("B", items[1])["letter_hit"] is False
+
+
+@pytest.mark.parametrize("answer,choice,hit", [
+    ("B) Heparin", "B", True),
+    ("(B)", "B", True),
+    ("**B) Heparin**", "B", True),
+    ("The correct answer is: **B) Heparin**", "B", True),
+    ("The answer is heparin.", "B", True),
+    ("Bleeding risk", None, False),
+    # explanation that walks through the correct option after a wrong pick
+    ("**Correct Answer: A) Aspirin**\nHeparin (B) is not given.", "A", False),
+    ("Aspirin is standard; heparin is not.", "A", False),
+    ("Based on the information provided, none of the options is accurate.", None, False),
+])
+def test_score_uses_chosen_option(answer, choice, hit):
+    s = score(answer, eval_items(_record(), 1)[0])
+    assert s["choice"] == choice and s["choice_hit"] is hit
+
+
+def test_score_wrong_label_with_right_text_is_wrong():
+    record = {"questions": [{"question": "Q", "answer_a": "Mild paraparesis in the right leg",
+                             "answer_b": "Mild paraparesis in the left leg", "correct":
+                             "Mild paraparesis in the left leg"}]}
+    s = score("**A) Mild paraparesis in the left leg**", eval_items(record, 1)[0])
+    assert s["choice"] == "A" and not s["choice_hit"] and s["substring_hit"]

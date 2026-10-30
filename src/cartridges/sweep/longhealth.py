@@ -7,8 +7,12 @@ import re
 from pathlib import Path
 
 _LETTERS = ("A", "B", "C", "D", "E")
-_LEADING_LETTER_RE = re.compile(r"^\s*\(?([A-E])\)?(?=[\s.:)]|$)")
+_LEADING_LETTER_RE = re.compile(r"^[\s*]*\(?([A-E])\)?(?=[\s.:)*]|$)")
 _OPTION_MARKER_RE = re.compile(r"(?:^|[\s*(:])([A-E])\)")
+ANSWER_INSTRUCTION = "Answer with the letter and text of the single correct option."
+# Bump when the eval prompt or scoring changes; older result.json files are re-run / skipped.
+# 2: answer-format instruction in the prompt; accuracy = the chosen option.
+EVAL_VERSION = 2
 
 
 def load_benchmark(path: str | Path) -> dict:
@@ -30,23 +34,25 @@ def patient_text(record: dict) -> str:
 
 
 def eval_items(record: dict, patient: int, limit: int | None = None) -> list[dict]:
-    """MCQ items with all five options inline and the correct option's letter and text.
+    """MCQ items with all five options inline, an answer-format instruction, and the key.
 
     ``correct_letter`` is None when the correct text does not match exactly one option; the
-    letter metric then counts that item as a miss and the item is flagged.
+    choice is then judged by the chosen option's text instead.
     """
     items = []
     for idx, q in enumerate(record["questions"][:limit]):
-        options = {k: q.get(f"answer_{k.lower()}", "") for k in _LETTERS}
+        options = {k: q.get(f"answer_{k.lower()}", "").strip() for k in _LETTERS}
+        options = {k: v for k, v in options.items() if v}
         correct = q.get("correct", "").strip()
         if not correct:
             raise ValueError(f"patient {patient} question {idx} has no correct answer.")
-        matches = [k for k, v in options.items() if v.strip() == correct]
-        opts = "\n".join(f"{k}) {v}" for k, v in options.items() if v)
+        matches = [k for k, v in options.items() if v == correct]
+        opts = "\n".join(f"{k}) {v}" for k, v in options.items())
         items.append(
             {
                 "id": f"lh_p{patient:02d}_q{idx:02d}",
-                "prompt": f"{q['question']}\n{opts}",
+                "prompt": f"{q['question']}\n{opts}\n\n{ANSWER_INSTRUCTION}",
+                "options": {k: v.lower() for k, v in options.items()},
                 "correct_text": correct.lower(),
                 "correct_letter": matches[0] if len(matches) == 1 else None,
             }
@@ -54,15 +60,34 @@ def eval_items(record: dict, patient: int, limit: int | None = None) -> list[dic
     return items
 
 
-def score(answer: str, item: dict) -> dict:
-    """Primary: correct option text appears in the answer.
+def chosen_option(answer: str, options: dict[str, str]) -> str | None:
+    """The single option the answer commits to, or None.
 
-    Secondary: the chosen letter matches, where the choice is a leading letter ("B", "(B)")
-    or else the first "X)" option marker ("The correct answer is: **C) ...").
+    In order: a leading letter ("B", "**B)"), the first "X)" marker anywhere
+    ("The correct answer is: **C) ..."), the option whose full text appears earliest.
+    Later mentions (explanations that walk through other options) are ignored.
     """
     match = _LEADING_LETTER_RE.match(answer) or _OPTION_MARKER_RE.search(answer)
+    if match and match.group(1) in options:
+        return match.group(1)
+    lowered = answer.lower()
+    found = {}
+    for k, v in options.items():
+        m = re.search(rf"(?<!\w){re.escape(v)}(?!\w)", lowered)
+        if m:
+            found[k] = m.start()
+    return min(found, key=found.get) if found else None
+
+
+def score(answer: str, item: dict) -> dict:
+    """Primary: the chosen option is the correct one. Logged: correct text appears anywhere."""
+    choice = chosen_option(answer, item["options"])
+    if item["correct_letter"] is not None:
+        hit = choice == item["correct_letter"]
+    else:
+        hit = choice is not None and item["options"][choice] == item["correct_text"]
     return {
+        "choice": choice,
+        "choice_hit": hit,
         "substring_hit": item["correct_text"] in answer.lower(),
-        "letter_hit": bool(match) and item["correct_letter"] is not None
-        and match.group(1) == item["correct_letter"],
     }

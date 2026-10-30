@@ -48,6 +48,7 @@ from cartridges.sweep.config import (  # noqa: E402
 )
 from cartridges.sweep.kv_quant import kv_bytes_per_slot, with_kv_precision  # noqa: E402
 from cartridges.sweep.longhealth import (  # noqa: E402
+    EVAL_VERSION,
     eval_items,
     load_benchmark,
     patient_record,
@@ -89,26 +90,28 @@ def _eval(model, adapter, items, build_input, device, max_new_tokens):
         hits = score(answer, item)
         records.append({"id": item["id"], "answer": answer, **hits,
                         "seconds": time.perf_counter() - t0})
-        mark = "+" if hits["substring_hit"] else "-"
-        print(f"  {mark} {item['id']}: {answer[:100]!r}  [expected {item['correct_letter']}) "
-              f"{item['correct_text'][:60]!r}]")
+        mark = "+" if hits["choice_hit"] else "-"
+        print(f"  {mark} {item['id']}: chose {hits['choice']}  {answer[:100]!r}  "
+              f"[expected {item['correct_letter']}) {item['correct_text'][:60]!r}]")
     return records
 
 
 def _row(base: dict, kv: str, records: list[dict], weight_bytes: int, kv_bytes: float,
          budget_mb: float) -> dict:
     n = len(records)
-    correct = sum(r["substring_hit"] for r in records)
-    letter = sum(r["letter_hit"] for r in records)
+    correct = sum(r["choice_hit"] for r in records)
+    substring = sum(r["substring_hit"] for r in records)
+    no_choice = sum(r["choice"] is None for r in records)
     total = weight_bytes + kv_bytes
     return {
         **base,
         "kv_precision": kv,
         "n_questions": n,
         "correct": correct,
-        "correct_letter": letter,
+        "correct_substring": substring,
+        "no_choice": no_choice,
         "accuracy": correct / n,
-        "letter_accuracy": letter / n,
+        "substring_accuracy": substring / n,
         "weight_mb": weight_bytes / MB,
         "cartridge_mb": kv_bytes / MB,
         "total_mb": total / MB,
@@ -140,10 +143,13 @@ def main() -> int:
     out = run_dir(cfg, args.model, args.quant, tag, args.patient)
     result_path = out / "result.json"
     if result_path.exists() and not args.force:
-        status = json.loads(result_path.read_text(encoding="utf-8")).get("status")
-        if status in ("ok", "does_not_fit"):
+        previous = json.loads(result_path.read_text(encoding="utf-8"))
+        status = previous.get("status")
+        if status in ("ok", "does_not_fit") and previous.get("eval_version") == EVAL_VERSION:
             print(f"Already done ({status}): {result_path}")
             return 0
+        print(f"Re-running stale result (status={status}, eval_version="
+              f"{previous.get('eval_version')}, current {EVAL_VERSION}): {result_path}")
     out.mkdir(parents=True, exist_ok=True)
 
     slice_id = f"lh_p{args.patient:02d}"
@@ -159,6 +165,7 @@ def main() -> int:
     budget_mb = cfg["budget_mb"]
 
     base = {
+        "eval_version": EVAL_VERSION,
         "model": args.model, "quant": args.quant, "group_size": cfg["quant_group_size"],
         "mode": args.mode, "tag": tag, "slots": args.slots, "patient": args.patient,
         "teacher": cfg["teacher"], "budget_mb": budget_mb, "attention": info,
@@ -294,10 +301,10 @@ def main() -> int:
             kv_bytes = args.slots * kv_bytes_per_slot(*shape, kv)
             rows.append(_row(base, kv, records, weight_bytes, kv_bytes, budget_mb))
 
-    _write(result_path, {"status": "ok", "rows": rows})
+    _write(result_path, {"status": "ok", "eval_version": EVAL_VERSION, "rows": rows})
     for r in rows:
         print(f"\n[{tag} KV={r['kv_precision']}] {r['correct']}/{r['n_questions']} "
-              f"(letter {r['correct_letter']}/{r['n_questions']})  "
+              f"(no option chosen: {r['no_choice']}, substring {r['correct_substring']})  "
               f"total {r['total_mb']:.1f} MB{'  OVER BUDGET' if r['over_budget'] else ''}")
     print(f"Saved {result_path}")
     return 0

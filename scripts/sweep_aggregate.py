@@ -27,6 +27,7 @@ import matplotlib.lines as mlines  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from cartridges.sweep.config import load_config, run_dir  # noqa: E402
+from cartridges.sweep.longhealth import EVAL_VERSION  # noqa: E402
 
 QUANT_ORDER = {"bf16": 0, "int8": 1, "int4": 2}
 MODE_ORDER = {"closed_book": 0, "full_context": 1, "cartridge": 2}
@@ -39,7 +40,12 @@ def _collect(cfg: dict) -> tuple[list[dict], list[dict]]:
     ok_rows, not_ok = [], []
     for path in sorted((cfg["output_root"] / "runs").glob("*/*/*/lh_p*/result.json")):
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("status") == "ok":
+        if payload.get("eval_version") != EVAL_VERSION:
+            row = (payload.get("rows") or [payload])[0]
+            not_ok.append({**row, "status": "stale",
+                           "reason": f"eval_version {payload.get('eval_version')}, rerun",
+                           "path": str(path)})
+        elif payload.get("status") == "ok":
             ok_rows.extend(payload["rows"])
         else:
             not_ok.append({**payload, "path": str(path)})
@@ -69,7 +75,8 @@ def _group(rows: list[dict], model_order: dict) -> list[dict]:
             "acc_se": se,
             "correct": sum(r["correct"] for r in rs),
             "questions": sum(r["n_questions"] for r in rs),
-            "letter_acc_mean": statistics.mean(r["letter_accuracy"] for r in rs),
+            "substring_acc_mean": statistics.mean(r["substring_accuracy"] for r in rs),
+            "no_choice": sum(r["no_choice"] for r in rs),
             "n_patients": n,
             "patients": " ".join(str(r["patient"]) for r in sorted(rs, key=lambda r: r["patient"])),
         })
@@ -81,8 +88,8 @@ def _group(rows: list[dict], model_order: dict) -> list[dict]:
 def _fmt_table(groups: list[dict]) -> list[str]:
     lines = [
         "| model | weights | mode | slots | KV | weight MB | cartridge MB | total MB | "
-        "accuracy (mean ± SE) | raw | letter acc | patients |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "accuracy (mean ± SE) | raw | no choice | substring acc | patients |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for g in groups:
         se = "n/a" if math.isnan(g["acc_se"]) else f"{g['acc_se']:.3f}"
@@ -91,7 +98,8 @@ def _fmt_table(groups: list[dict]) -> list[str]:
             f"| {g['model']} | {g['quant']} | {g['mode'] if g['mode'] != 'cartridge' else g['tag']} "
             f"| {g['slots']} | {g['kv_precision']} | {g['weight_mb']:.1f} | {g['cartridge_mb']:.1f} "
             f"| {g['total_mb']:.1f}{flag} | {g['acc_mean']:.3f} ± {se} "
-            f"| {g['correct']}/{g['questions']} | {g['letter_acc_mean']:.3f} | {g['n_patients']} |"
+            f"| {g['correct']}/{g['questions']} | {g['no_choice']} | {g['substring_acc_mean']:.3f} "
+            f"| {g['n_patients']} |"
         )
     return lines
 
@@ -190,8 +198,10 @@ def main() -> int:
         writer.writerows(groups)
 
     lines = [f"# Size sweep results (budget {cfg['budget_mb']} MB, weights + cartridge KV)", "",
-             "Accuracy = correct option text appears in the answer; letter acc = answer starts "
-             "with the correct letter. OVER = total exceeds the budget. Totals exclude activations.",
+             "Accuracy = the option the answer commits to (leading letter, else first 'X)' marker, "
+             "else earliest option text) is correct. No choice = answers that picked no option. "
+             "Substring acc (logged only) = correct option text appears anywhere, inflated by "
+             "explanations. OVER = total exceeds the budget. Totals exclude activations.",
              "", *_fmt_table(groups)]
 
     if not_ok:
