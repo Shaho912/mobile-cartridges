@@ -58,6 +58,27 @@ def _collect(cfg: dict) -> tuple[list[dict], list[dict]]:
     return ok_rows, not_ok
 
 
+def _quant_label(row: dict, default_group_size: int) -> str:
+    q, gs = row["quant"], row["group_size"]
+    return q if q == "bf16" or gs == default_group_size else f"{q}_g{gs}"
+
+
+def _relative_to_closed_book(rows: list[dict]) -> None:
+    """Per row: accuracy minus the closed-book run of the same model/weights/patient, and hits
+    on the questions that closed-book run got wrong (the ones that need the record)."""
+    refs = {(r["model"], r["quant_label"], r["patient"], r["mode"]): r
+            for r in rows if r["mode"] in ("closed_book", "full_context")}
+    for r in rows:
+        closed = refs.get((r["model"], r["quant_label"], r["patient"], "closed_book"))
+        r["lift"] = r["ctx_hits"] = r["ctx_total"] = None
+        if closed is None or r["mode"] == "closed_book":
+            continue
+        r["lift"] = r["accuracy"] - closed["accuracy"]
+        missed = {q["id"] for q in closed["questions"] if not q["choice_hit"]}
+        r["ctx_total"] = len(missed)
+        r["ctx_hits"] = sum(q["choice_hit"] for q in r["questions"] if q["id"] in missed)
+
+
 def _rescore(rows: list[dict], cfg: dict) -> None:
     """Re-score every saved answer with the current parser, so parser fixes need no rerun."""
     bench = load_benchmark(cfg["benchmark_json"])
@@ -77,18 +98,29 @@ def _rescore(rows: list[dict], cfg: dict) -> None:
         r["substring_accuracy"] = r["correct_substring"] / n
 
 
+def _mean_se(values: list[float]) -> tuple[float, float]:
+    n = len(values)
+    if not n:
+        return float("nan"), float("nan")
+    se = statistics.stdev(values) / math.sqrt(n) if n > 1 else float("nan")
+    return statistics.mean(values), se
+
+
 def _group(rows: list[dict], model_order: dict) -> list[dict]:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        groups[(r["model"], r["quant"], r["mode"], r["tag"], r["kv_precision"])].append(r)
+        groups[(r["model"], r["quant_label"], r["mode"], r["tag"], r["kv_precision"])].append(r)
     out = []
-    for (model, quant, mode, tag, kv), rs in groups.items():
+    for (model, quant_label, mode, tag, kv), rs in groups.items():
         accs = [r["accuracy"] for r in rs]
         n = len(rs)
-        se = statistics.stdev(accs) / math.sqrt(n) if n > 1 else float("nan")
+        acc_mean, se = _mean_se(accs)
+        lift_mean, lift_se = _mean_se([r["lift"] for r in rs if r["lift"] is not None])
+        ctx = [r for r in rs if r["ctx_total"] is not None]
         slots = sorted({r["slots"] for r in rs if r["slots"] is not None})
         out.append({
-            "model": model, "quant": quant, "mode": mode, "tag": tag, "kv_precision": kv,
+            "model": model, "quant": rs[0]["quant"], "quant_label": quant_label,
+            "group_size": rs[0]["group_size"], "mode": mode, "tag": tag, "kv_precision": kv,
             "slots": (str(slots[0]) if len(slots) == 1 else f"{min(slots)}-{max(slots)}")
             if slots else "",
             "slots_mean": statistics.mean(r["slots"] for r in rs) if slots else 0,
@@ -96,35 +128,60 @@ def _group(rows: list[dict], model_order: dict) -> list[dict]:
             "cartridge_mb": statistics.mean(r["cartridge_mb"] for r in rs),
             "total_mb": statistics.mean(r["total_mb"] for r in rs),
             "over_budget": any(r["over_budget"] for r in rs),
-            "acc_mean": statistics.mean(accs),
+            "acc_mean": acc_mean,
             "acc_se": se,
             "correct": sum(r["correct"] for r in rs),
             "questions": sum(r["n_questions"] for r in rs),
+            "lift_mean": lift_mean,
+            "lift_se": lift_se,
+            "ctx_hits": sum(r["ctx_hits"] for r in ctx) if ctx else None,
+            "ctx_total": sum(r["ctx_total"] for r in ctx) if ctx else None,
+            "gap_recovered": None,
             "substring_acc_mean": statistics.mean(r["substring_accuracy"] for r in rs),
             "no_choice": sum(r["no_choice"] for r in rs),
             "n_patients": n,
             "patients": " ".join(str(r["patient"]) for r in sorted(rs, key=lambda r: r["patient"])),
         })
+    # Fraction of the closed-book -> full-context gain a cartridge recovers. Undefined when
+    # full context barely beats closed book (gap under one question per patient).
+    full_lift = {(g["model"], g["quant_label"]): g["lift_mean"] for g in out
+                 if g["mode"] == "full_context"}
+    for g in out:
+        gap = full_lift.get((g["model"], g["quant_label"]))
+        if g["mode"] == "cartridge" and gap is not None and not math.isnan(gap) \
+                and not math.isnan(g["lift_mean"]) and gap >= 1 / 20:
+            g["gap_recovered"] = g["lift_mean"] / gap
     out.sort(key=lambda g: (model_order.get(g["model"], 99), QUANT_ORDER[g["quant"]],
-                            MODE_ORDER[g["mode"]], g["slots_mean"], g["kv_precision"]))
+                            g["group_size"] or 0, MODE_ORDER[g["mode"]], g["slots_mean"],
+                            g["kv_precision"]))
     return out
 
 
 def _fmt_table(groups: list[dict]) -> list[str]:
     lines = [
         "| model | weights | mode | slots | KV | weight MB | cartridge MB | total MB | "
-        "accuracy (mean ± SE) | raw | no choice | substring acc | patients |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "accuracy (mean ± SE) | raw | lift vs closed book (mean ± SE) | right on closed-book "
+        "misses | gap recovered | no choice | substring acc | patients |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+
+    def pm(mean, se):
+        if math.isnan(mean):
+            return ""
+        return f"{mean:+.3f} ± {'n/a' if math.isnan(se) else f'{se:.3f}'}"
+
     for g in groups:
         se = "n/a" if math.isnan(g["acc_se"]) else f"{g['acc_se']:.3f}"
         flag = " OVER" if g["over_budget"] else ""
+        ctx = f"{g['ctx_hits']}/{g['ctx_total']}" if g["ctx_total"] is not None else ""
+        gap = f"{g['gap_recovered']:.2f}" if g["gap_recovered"] is not None else ""
         lines.append(
-            f"| {g['model']} | {g['quant']} | {g['mode'] if g['mode'] != 'cartridge' else g['tag']} "
+            f"| {g['model']} | {g['quant_label']} "
+            f"| {g['mode'] if g['mode'] != 'cartridge' else g['tag']} "
             f"| {g['slots']} | {g['kv_precision']} | {g['weight_mb']:.1f} | {g['cartridge_mb']:.1f} "
             f"| {g['total_mb']:.1f}{flag} | {g['acc_mean']:.3f} ± {se} "
-            f"| {g['correct']}/{g['questions']} | {g['no_choice']} | {g['substring_acc_mean']:.3f} "
-            f"| {g['n_patients']} |"
+            f"| {g['correct']}/{g['questions']} | {pm(g['lift_mean'], g['lift_se'])} | {ctx} | {gap} "
+            f"| {g['no_choice']} | {g['substring_acc_mean']:.3f} | {g['n_patients']} |"
         )
     return lines
 
@@ -138,15 +195,16 @@ def _plot(groups: list[dict], model_ids: list[str], budget_mb: float, path: Path
     series: dict[tuple, list[dict]] = defaultdict(list)
     for g in groups:
         if g["mode"] == "cartridge":
-            series[(g["model"], g["quant"], g["kv_precision"])].append(g)
-    for (model, quant, kv), gs in series.items():
+            series[(g["model"], g["quant"], g["quant_label"], g["kv_precision"])].append(g)
+    for (model, quant, quant_label, kv), gs in series.items():
         gs = sorted(gs, key=lambda g: g["total_mb"])
         int8kv = kv == "int8"
+        style = ":" if quant_label != quant else ("--" if int8kv else "-")
         ax.errorbar(
             [g["total_mb"] for g in gs], [g["acc_mean"] for g in gs],
             yerr=[0 if math.isnan(g["acc_se"]) else g["acc_se"] for g in gs],
             color=colors[model], marker=QUANT_MARKERS[quant], markersize=8,
-            linewidth=1.6, linestyle="--" if int8kv else "-", capsize=2.5, elinewidth=1,
+            linewidth=1.6, linestyle=style, capsize=2.5, elinewidth=1,
             markerfacecolor="white" if int8kv else colors[model], markeredgewidth=1.4, zorder=3,
         )
     for g in groups:
@@ -193,6 +251,9 @@ def _plot(groups: list[dict], model_ids: list[str], budget_mb: float, path: Path
         mlines.Line2D([], [], color=INK, marker="X", linestyle="none", markersize=8,
                       label="closed book (no context)"),
     ]
+    if any(g["quant_label"] != g["quant"] for g in groups):
+        mode_handles.append(mlines.Line2D([], [], color=INK, linewidth=1.6, linestyle=":",
+                                          label="non-default quant group size"))
     ax.legend(handles=model_handles + quant_handles + mode_handles, fontsize=8, loc="upper left",
               bbox_to_anchor=(1.01, 1.0), frameon=False)
     ax.set_title("Accuracy vs memory per chip, single cartridge per patient",
@@ -214,6 +275,9 @@ def main() -> int:
         print("No completed runs found.", file=sys.stderr)
         return 1
     _rescore(rows, cfg)
+    for r in rows:
+        r["quant_label"] = _quant_label(r, cfg["quant_group_size"])
+    _relative_to_closed_book(rows)
     groups = _group(rows, {m: i for i, m in enumerate(model_ids)})
 
     report = cfg["output_root"] / "report"
