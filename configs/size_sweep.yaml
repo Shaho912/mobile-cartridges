@@ -31,6 +31,7 @@ train:
   top_logprobs: 5
   num_frozen_tokens: 1
   validation_interval: 10
+  holdout_validation: true  # the 16 validation questions are excluded from training
   seed: 0
   keep_checkpoints: false   # keep only the best cartridge per run
 

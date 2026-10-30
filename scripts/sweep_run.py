@@ -280,6 +280,7 @@ def main() -> int:
             cartridge_tokens=args.slots, num_frozen_tokens=tr["num_frozen_tokens"],
             learning_rate=tr["learning_rate"], steps=tr["steps"], seed=tr["seed"],
             validation_interval=tr["validation_interval"],
+            holdout_validation=tr.get("holdout_validation", False),
             initialization_text=adapter.init_text(system_prompt),
             model=model, tokenizer=tokenizer, prompt_fn=adapter.query_ids,
         )

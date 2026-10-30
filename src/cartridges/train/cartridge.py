@@ -286,6 +286,7 @@ def train_cartridge(
     seed: int = 0,
     validation_examples: int = 16,
     validation_interval: int = 10,
+    holdout_validation: bool = False,
     kvzip_init: bool = False,
     kvzip_prefix_tokens: int = 256,
     kvzip_chunk_size: int = 1024,
@@ -320,6 +321,11 @@ def train_cartridge(
     if not examples:
         raise ValueError(f"No examples found for slice_id={slice_id}.")
     validation_subset = examples[: min(validation_examples, len(examples))]
+    if holdout_validation:
+        # Train only on the rest, so validation loss (and best-checkpoint selection) sees overfitting.
+        examples = examples[len(validation_subset):]
+        if not examples:
+            raise ValueError("holdout_validation leaves no training examples.")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -359,6 +365,7 @@ def train_cartridge(
         "seed": seed,
         "validation_examples": len(validation_subset),
         "validation_interval": validation_interval,
+        "holdout_validation": holdout_validation,
     }
 
     if resume_from is not None:
