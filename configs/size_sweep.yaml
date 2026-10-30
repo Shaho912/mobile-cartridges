@@ -1,0 +1,62 @@
+# Single-cartridge model-size sweep on LongHealth under a per-chip memory budget.
+# Budget = base weights (after quantization) + cartridge KV. Activations excluded.
+
+benchmark_json: ~/zaptridge/data/longhealth_benchmark_v5.json   # read-only
+output_root: outputs/size_sweep                                  # new directory; nothing else is touched
+
+budget_mb: 500
+patients: [1, 2, 3, 4, 6]   # p05 skipped: question 4 lists durations as options for a CT question
+questions_per_patient: 20
+
+# Fake quantization (quantize then dequantize to bf16), applied to all Linear + Embedding weights.
+quant_group_size: 128
+
+# Teacher for KL distillation. "self" = the same (quantized) model with the full patient
+# record in context. A separate teacher (e.g. Qwen3-8B for Qwen3-0.6B) is future work.
+teacher: self
+
+# Shared bootstrap questions: generated once per patient by the vLLM server below and reused
+# by every model. Each run computes its own teacher logprobs with its own quantized model.
+bootstrap:
+  vllm_model: Qwen/Qwen3-4B
+  base_url: http://127.0.0.1:8000/v1
+  api_key: cartridges-local
+  count: 120
+
+train:
+  steps: 240
+  learning_rate: 3.0e-3
+  top_logprobs: 5
+  num_frozen_tokens: 1
+  validation_interval: 10
+  seed: 0
+  keep_checkpoints: false   # keep only the best cartridge per run
+
+eval:
+  max_new_tokens: 200
+
+# Grid. modes: closed_book (question only), full_context (whole record in the prompt),
+# plus one cartridge run per entry in `slots`. max_slots_kv adds the largest slot count that
+# fits the budget for each listed KV precision (skipped when weights alone exceed the budget).
+# kv_eval: KV storage precisions every cartridge run is evaluated at.
+models:
+  - id: Qwen/Qwen3-8B
+    quants: [bf16]
+    modes: [closed_book, full_context]
+    slots: [1024]
+    max_slots_kv: []
+    kv_eval: [bf16]
+
+  - id: Qwen/Qwen3-0.6B
+    quants: [bf16, int8, int4]
+    modes: [closed_book, full_context]
+    slots: [128, 256, 512, 1024]
+    max_slots_kv: [bf16, int8]
+    kv_eval: [bf16, int8]
+
+  - id: google/gemma-3-270m-it
+    quants: [bf16, int8, int4]
+    modes: [closed_book, full_context]
+    slots: [128, 256, 512, 1024]
+    max_slots_kv: [bf16]
+    kv_eval: [bf16]

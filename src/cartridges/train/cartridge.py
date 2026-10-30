@@ -159,6 +159,7 @@ def _compute_example_loss(
     cartridge: TrainableKVCartridge,
     example: TrainingExample,
     device: str,
+    prompt_fn=_training_prompt,
 ) -> torch.Tensor:
     """Compute the sparse distillation loss for one prompt/answer pair.
 
@@ -166,7 +167,7 @@ def _compute_example_loss(
     supervision. This function's job is just to reproduce the same token positions on the student
     side so ``_sparse_distillation_loss`` compares like with like.
     """
-    prompt_ids = _training_prompt(tokenizer, example.user_message).to(device)
+    prompt_ids = prompt_fn(tokenizer, example.user_message).to(device)
     # Teacher-forcing: append all target tokens except the last so each logits position
     # predicts the next ``assistant_token_ids`` entry (same alignment as in
     # ``build_training_dataset`` when slicing ``response_logits``).
@@ -202,6 +203,7 @@ def _evaluate_examples_loss(
     cartridge: TrainableKVCartridge,
     examples: list[TrainingExample],
     device: str,
+    prompt_fn=_training_prompt,
 ) -> float:
     """Average loss over a fixed validation subset for stable checkpoint selection."""
     if not examples:
@@ -215,6 +217,7 @@ def _evaluate_examples_loss(
                 cartridge=cartridge,
                 example=example,
                 device=device,
+                prompt_fn=prompt_fn,
             )
             losses.append(float(loss.item()))
     return sum(losses) / len(losses)
@@ -290,6 +293,9 @@ def train_cartridge(
     kvzip_prune_tokens: int | None = None,
     profile_flops: bool = False,
     movement_log_interval: int | None = None,
+    model=None,
+    tokenizer=None,
+    prompt_fn=None,
 ) -> dict[str, Any]:
     """Train one cartridge budget against a fixed supervision dataset.
 
@@ -321,17 +327,25 @@ def train_cartridge(
     if resume_from is None:
         _set_training_seed(seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_HF_MODEL_ID)
-    # KVzip+ scoring requires output_attentions=True, which SDPA does not support.
-    # When kvzip_init is enabled we load with eager attention for the full session;
-    # training is slightly slower but avoids loading two model copies simultaneously.
-    attn_implementation = "eager" if kvzip_init else "sdpa"
-    model = AutoModelForCausalLM.from_pretrained(
-        DEFAULT_HF_MODEL_ID,
-        dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32,
-        attn_implementation=attn_implementation,
-    )
-    model.to(device)
+    if prompt_fn is None:
+        prompt_fn = _training_prompt
+    if (model is None) != (tokenizer is None):
+        raise ValueError("Pass both model and tokenizer, or neither.")
+    if model is None:
+        model_id = DEFAULT_HF_MODEL_ID
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        # KVzip+ scoring requires output_attentions=True, which SDPA does not support.
+        # When kvzip_init is enabled we load with eager attention for the full session;
+        # training is slightly slower but avoids loading two model copies simultaneously.
+        attn_implementation = "eager" if kvzip_init else "sdpa"
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32,
+            attn_implementation=attn_implementation,
+        )
+        model.to(device)
+    else:
+        model_id = model.config.name_or_path
     model.eval()
     for param in model.parameters():
         param.requires_grad_(False)
@@ -341,7 +355,7 @@ def train_cartridge(
         "slice_id": slice_id,
         "cartridge_tokens": cartridge_tokens,
         "num_frozen_tokens": num_frozen_tokens,
-        "model_id": DEFAULT_HF_MODEL_ID,
+        "model_id": model_id,
         "seed": seed,
         "validation_examples": len(validation_subset),
         "validation_interval": validation_interval,
@@ -428,7 +442,7 @@ def train_cartridge(
         ) as _p:
             _profile_loss = _compute_example_loss(
                 model=model, tokenizer=tokenizer, cartridge=cartridge,
-                example=_profile_example, device=device,
+                example=_profile_example, device=device, prompt_fn=prompt_fn,
             )
             (_profile_loss / gradient_accumulation_steps).backward()
             optimizer.zero_grad(set_to_none=True)
@@ -456,6 +470,7 @@ def train_cartridge(
             cartridge=cartridge,
             example=example,
             device=device,
+            prompt_fn=prompt_fn,
         )
         loss_value = float(loss.item())
         loss_history.append(loss_value)
@@ -505,6 +520,7 @@ def train_cartridge(
                     cartridge=cartridge,
                     examples=validation_subset,
                     device=device,
+                    prompt_fn=prompt_fn,
                 )
                 validation_history.append(
                     {

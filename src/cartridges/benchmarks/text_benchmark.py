@@ -277,6 +277,15 @@ def route_eval_questions(
     return routes
 
 
+def context_system_prompt(corpus_text: str) -> str:
+    """System prompt (instructions + full corpus) used by the full-context teacher."""
+    return (
+        "Please answer the user's question using only the provided context.\n\n"
+        f"<context>\n{corpus_text}\n</context>\n\n"
+        "Follow the requested answer format exactly. Do not emit <think> tags or chain-of-thought."
+    )
+
+
 def _clean_assistant_text(text: str) -> str:
     """Remove reasoning tags and normalize whitespace in teacher/model output."""
     cleaned = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL)
@@ -285,14 +294,17 @@ def _clean_assistant_text(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
-def _assistant_target_token_ids(tokenizer, assistant_text: str) -> list[int]:
+def _assistant_target_token_ids(
+    tokenizer, assistant_text: str, eos_token_id: int | None = None
+) -> list[int]:
     """Tokenize ``assistant_text`` and append EOS.
 
     The returned list is stored as ``assistant_token_ids`` in training JSONL; each id has
     a matching entry in ``assistant_supervision`` built from teacher logits at that step.
     """
     assistant_token_ids = tokenizer.encode(assistant_text, add_special_tokens=False)
-    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is None:
+        eos_token_id = tokenizer.eos_token_id
     if eos_token_id is None:
         raise ValueError("Tokenizer must expose an eos_token_id for cartridge training.")
     return assistant_token_ids + [int(eos_token_id)]
@@ -442,6 +454,10 @@ def build_training_dataset(
     output_path: str | Path,
     device: str,
     top_logprobs: int,
+    model=None,
+    tokenizer=None,
+    eos_token_id: int | None = None,
+    chat_prompt_ids=None,
 ) -> list[dict[str, Any]]:
     """Run the HF teacher on (system=context, user=answer_record) and write distillation JSONL.
 
@@ -450,26 +466,26 @@ def build_training_dataset(
     and ``assistant_supervision``. Rows also include ``system_prompt`` (full corpus context)
     and ``messages`` for traceability; the trainer reads ``system_prompt``, first user
     message, those two fields, plus ``slice_ids`` / ``record_id``.
+
+    Pass ``model``/``tokenizer`` to use an already-loaded (e.g. fake-quantized) teacher.
     """
     if not answer_records:
         raise ValueError("Cannot build a training dataset without teacher answer records.")
 
-    tokenizer = AutoTokenizer.from_pretrained(DEFAULT_HF_MODEL_ID)
-    model = AutoModelForCausalLM.from_pretrained(
-        DEFAULT_HF_MODEL_ID,
-        dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32,
-        attn_implementation="sdpa",
-    )
-    model.to(device)
+    if (model is None) != (tokenizer is None):
+        raise ValueError("Pass both model and tokenizer, or neither.")
+    if model is None:
+        tokenizer = AutoTokenizer.from_pretrained(DEFAULT_HF_MODEL_ID)
+        model = AutoModelForCausalLM.from_pretrained(
+            DEFAULT_HF_MODEL_ID,
+            dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32,
+            attn_implementation="sdpa",
+        )
+        model.to(device)
     model.eval()
 
     rows: list[dict[str, Any]] = []
-    # system prompt is the instructions + context (large text corpus)
-    system_prompt = (
-        "Please answer the user's question using only the provided context.\n\n"
-        f"<context>\n{corpus_text}\n</context>\n\n"
-        "Follow the requested answer format exactly. Do not emit <think> tags or chain-of-thought."
-    )
+    system_prompt = context_system_prompt(corpus_text)
     with torch.inference_mode():
         for answer_record in answer_records:
             # ``assistant_text`` originates from bootstrap ``expected_answer`` via
@@ -480,16 +496,21 @@ def build_training_dataset(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ]
-            prompt_text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-            prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+            if chat_prompt_ids is not None:
+                prompt_ids = chat_prompt_ids(messages)
+            else:
+                prompt_text = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    chat_template_kwargs={"enable_thinking": False},
+                )
+                prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
             # The target includes EOS so the trainer learns not only which short answer to start
             # with, but also where to stop generation.
-            assistant_token_ids = _assistant_target_token_ids(tokenizer, assistant_text)
+            assistant_token_ids = _assistant_target_token_ids(
+                tokenizer, assistant_text, eos_token_id
+            )
             if len(assistant_token_ids) <= 1:
                 continue
 
