@@ -6,8 +6,8 @@
 #SBATCH --job-name=size-sweep
 #SBATCH --partition=b200-mig45
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=48G
 #SBATCH --time=03:00:00
 #SBATCH --output=outputs/size_sweep/slurm/%x_%A_%a.out
 set -eo pipefail
