@@ -289,6 +289,9 @@ def main() -> int:
         base["train"] = {k: summary[k] for k in (
             "best_loss", "best_step", "initial_loss", "final_loss", "train_loop_seconds",
             "validation_history", "cartridge_path")}
+        t = base["train"]
+        print(f"[train] loss {t['initial_loss']:.4f} -> best {t['best_loss']:.4f} at step "
+              f"{t['best_step']} (final {t['final_loss']:.4f}), {t['train_loop_seconds']:.0f} s")
 
         cart = TrainableKVCartridge.load(summary["cartridge_path"], device=args.device)
         base["cache_visibility"] = cache_visibility(model, cart)
