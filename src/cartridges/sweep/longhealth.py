@@ -9,6 +9,9 @@ from pathlib import Path
 _LETTERS = ("A", "B", "C", "D", "E")
 _LEADING_LETTER_RE = re.compile(r"^[\s*]*\(?([A-E])\)?(?=[\s.:)*]|$)")
 _OPTION_MARKER_RE = re.compile(r"(?:^|[\s*(:])([A-E])\)")
+_ANSWER_LABEL_RE = re.compile(
+    r"(?:answer|option)(?:\s+is)?[\s*:]*\(?([A-E])(?![a-z])", re.IGNORECASE
+)
 ANSWER_INSTRUCTION = "Answer with the letter and text of the single correct option."
 # Bump when the eval prompt or scoring changes; older result.json files are re-run / skipped.
 # 2: answer-format instruction in the prompt; accuracy = the chosen option.
@@ -63,11 +66,16 @@ def eval_items(record: dict, patient: int, limit: int | None = None) -> list[dic
 def chosen_option(answer: str, options: dict[str, str]) -> str | None:
     """The single option the answer commits to, or None.
 
-    In order: a leading letter ("B", "**B)"), the first "X)" marker anywhere
-    ("The correct answer is: **C) ..."), the option whose full text appears earliest.
-    Later mentions (explanations that walk through other options) are ignored.
+    In order: a leading letter ("B", "**B)"), the first answer label ("**Answer: B**",
+    "Correct Option: D"), the first "X)" marker ("The correct answer is: **C) ..."), the
+    option whose full text appears earliest. Later mentions (explanations that walk through
+    other options) are ignored.
     """
-    match = _LEADING_LETTER_RE.match(answer) or _OPTION_MARKER_RE.search(answer)
+    match = (
+        _LEADING_LETTER_RE.match(answer)
+        or _ANSWER_LABEL_RE.search(answer)
+        or _OPTION_MARKER_RE.search(answer)
+    )
     if match and match.group(1) in options:
         return match.group(1)
     lowered = answer.lower()

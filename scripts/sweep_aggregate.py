@@ -27,7 +27,13 @@ import matplotlib.lines as mlines  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
 from cartridges.sweep.config import load_config, run_dir  # noqa: E402
-from cartridges.sweep.longhealth import EVAL_VERSION  # noqa: E402
+from cartridges.sweep.longhealth import (  # noqa: E402
+    EVAL_VERSION,
+    eval_items,
+    load_benchmark,
+    patient_record,
+    score,
+)
 
 QUANT_ORDER = {"bf16": 0, "int8": 1, "int4": 2}
 MODE_ORDER = {"closed_book": 0, "full_context": 1, "cartridge": 2}
@@ -50,6 +56,25 @@ def _collect(cfg: dict) -> tuple[list[dict], list[dict]]:
         else:
             not_ok.append({**payload, "path": str(path)})
     return ok_rows, not_ok
+
+
+def _rescore(rows: list[dict], cfg: dict) -> None:
+    """Re-score every saved answer with the current parser, so parser fixes need no rerun."""
+    bench = load_benchmark(cfg["benchmark_json"])
+    items = {}
+    for p in {r["patient"] for r in rows}:
+        for it in eval_items(patient_record(bench, p), p, cfg["questions_per_patient"]):
+            items[it["id"]] = it
+    for r in rows:
+        qs = r["questions"]
+        for q in qs:
+            q.update(score(q["answer"], items[q["id"]]))
+        n = len(qs)
+        r["correct"] = sum(q["choice_hit"] for q in qs)
+        r["correct_substring"] = sum(q["substring_hit"] for q in qs)
+        r["no_choice"] = sum(q["choice"] is None for q in qs)
+        r["accuracy"] = r["correct"] / n
+        r["substring_accuracy"] = r["correct_substring"] / n
 
 
 def _group(rows: list[dict], model_order: dict) -> list[dict]:
@@ -188,6 +213,7 @@ def main() -> int:
     if not rows:
         print("No completed runs found.", file=sys.stderr)
         return 1
+    _rescore(rows, cfg)
     groups = _group(rows, {m: i for i, m in enumerate(model_ids)})
 
     report = cfg["output_root"] / "report"

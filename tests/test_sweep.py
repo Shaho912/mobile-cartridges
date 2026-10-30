@@ -124,6 +124,15 @@ def test_eval_items():
     ("**Correct Answer: A) Aspirin**\nHeparin (B) is not given.", "A", False),
     ("Aspirin is standard; heparin is not.", "A", False),
     ("Based on the information provided, none of the options is accurate.", None, False),
+    # formats seen from Qwen3-0.6B on the cluster
+    ("**Answer: B**  \n**Text:**  \nHeparin", "B", True),
+    ("**Correct Option: D**  \n**Text:**", "D", False),
+    ("**Answer:**\n\n**B**  \n**Heparin.**", "B", True),
+    ("**Answer: A)** Aspirin  \n**Answer: B)** Heparin", "A", False),
+    ("**Correct answer: A)** Aspirin was discontinued.", "A", False),
+    ("**A** Aspirin", "A", False),
+    ("The answer is B because heparin.", "B", True),
+    ("Answer: Heparin", "B", True),
 ])
 def test_score_uses_chosen_option(answer, choice, hit):
     s = score(answer, eval_items(_record(), 1)[0])
