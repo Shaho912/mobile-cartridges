@@ -157,6 +157,49 @@ def _group(rows: list[dict], model_order: dict) -> list[dict]:
     return out
 
 
+def _sign_test_p(wins: int, losses: int) -> float:
+    """Two-sided exact sign test on discordant questions (ties dropped)."""
+    n = wins + losses
+    if not n:
+        return 1.0
+    tail = sum(math.comb(n, k) for k in range(min(wins, losses) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def _trained_vs_init(rows: list[dict]) -> list[str]:
+    """Per question: trained cartridge vs the untrained (prefix-initialized) cartridge with the
+    same slots, weights, KV precision and patient. Only questions where they disagree count."""
+    init = {(r["model"], r["quant_label"], r["patient"], r["kv_precision"], r["tag"][:-5]): r
+            for r in rows if r["mode"] == "cartridge" and r["tag"].endswith("_init")}
+    pairs: dict[tuple, list] = defaultdict(lambda: [0, 0, 0, set()])
+    for r in rows:
+        if r["mode"] != "cartridge" or r["tag"].endswith("_init"):
+            continue
+        ref = init.get((r["model"], r["quant_label"], r["patient"], r["kv_precision"], r["tag"]))
+        if ref is None:
+            continue
+        ref_hit = {q["id"]: q["choice_hit"] for q in ref["questions"]}
+        acc = pairs[(r["model"], r["quant_label"], r["tag"], r["kv_precision"])]
+        for q in r["questions"]:
+            if q["id"] not in ref_hit:
+                continue
+            acc[0] += q["choice_hit"] and not ref_hit[q["id"]]
+            acc[1] += ref_hit[q["id"]] and not q["choice_hit"]
+            acc[2] += 1
+        acc[3].add(r["patient"])
+    if not pairs:
+        return []
+    lines = ["", "## Trained vs untrained cartridge (same slots, paired by question)", "",
+             "Trained only = questions the trained cartridge got right and the untrained one "
+             "missed; untrained only = the reverse. p = two-sided sign test on those questions.",
+             "", "| model | weights | slots | KV | trained only | untrained only | net | p | "
+             "questions | patients |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for (model, ql, tag, kv), (w, l, n, ps) in sorted(pairs.items()):
+        lines.append(f"| {model} | {ql} | {tag} | {kv} | {w} | {l} | {w - l:+d} | "
+                     f"{_sign_test_p(w, l):.3f} | {n} | {' '.join(map(str, sorted(ps)))} |")
+    return lines
+
+
 def _fmt_table(groups: list[dict]) -> list[str]:
     lines = [
         "| model | weights | mode | slots | KV | weight MB | cartridge MB | total MB | "
@@ -292,7 +335,7 @@ def main() -> int:
              "else earliest option text) is correct. No choice = answers that picked no option. "
              "Substring acc (logged only) = correct option text appears anywhere, inflated by "
              "explanations. OVER = total exceeds the budget. Totals exclude activations.",
-             "", *_fmt_table(groups)]
+             "", *_fmt_table(groups), *_trained_vs_init(rows)]
 
     if not_ok:
         lines += ["", "## Runs that did not complete", "",
