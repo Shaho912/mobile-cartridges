@@ -64,6 +64,10 @@ def main() -> int:
                 for slots in spec["slots"]:
                     jobs.append({**common, "mode": "cartridge", "slots": slots,
                                  "slot_tag": f"s{slots}", "kv_eval": kv_eval})
+                    if cfg["train"].get("init_baseline"):
+                        jobs.append({**common, "mode": "cartridge", "slots": slots,
+                                     "slot_tag": f"s{slots}_init", "kv_eval": kv_eval,
+                                     "train_steps": 1})
                 for kv in spec["max_slots_kv"]:
                     m = max_slots_under_budget(model_id, quant, group, kv, cfg["budget_mb"],
                                                doc_tokens[p])
@@ -87,6 +91,8 @@ def main() -> int:
                  "--patient", str(j["patient"])]
         if j["group_size"]:
             parts += ["--quant-group-size", str(j["group_size"])]
+        if j.get("train_steps"):
+            parts += ["--train-steps", str(j["train_steps"])]
         if j["mode"] == "cartridge":
             parts += ["--slots", str(j["slots"]), "--slot-tag", j["slot_tag"],
                       "--kv-eval", *j["kv_eval"]]

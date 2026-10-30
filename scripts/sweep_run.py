@@ -133,6 +133,8 @@ def main() -> int:
     parser.add_argument("--patient", type=int, required=True)
     parser.add_argument("--quant-group-size", type=int, default=None,
                         help="Override quant_group_size (quantized runs go to <quant>_g<N>/).")
+    parser.add_argument("--train-steps", type=int, default=None,
+                        help="Override train.steps (1 = prefix-initialized cartridge, untrained).")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -143,6 +145,8 @@ def main() -> int:
     cfg = load_config(args.config)
     if args.quant_group_size:
         cfg["quant_group_size"] = args.quant_group_size
+    if args.train_steps:
+        cfg["train"]["steps"] = args.train_steps
     # Group size is always in the directory name, so changing the default never mixes sizes.
     quant_dir = args.quant if args.quant == "bf16" else f"{args.quant}_g{cfg['quant_group_size']}"
     tag = args.mode if args.mode != "cartridge" else (args.slot_tag or f"s{args.slots}")
@@ -151,11 +155,15 @@ def main() -> int:
     if result_path.exists() and not args.force:
         previous = json.loads(result_path.read_text(encoding="utf-8"))
         status = previous.get("status")
-        if status in ("ok", "does_not_fit") and previous.get("eval_version") == EVAL_VERSION:
+        same_train = args.mode != "cartridge" or status != "ok" \
+            or previous["rows"][0].get("train_config") == cfg["train"]
+        if status in ("ok", "does_not_fit") and previous.get("eval_version") == EVAL_VERSION \
+                and same_train:
             print(f"Already done ({status}): {result_path}")
             return 0
         print(f"Re-running stale result (status={status}, eval_version="
-              f"{previous.get('eval_version')}, current {EVAL_VERSION}): {result_path}")
+              f"{previous.get('eval_version')}, current {EVAL_VERSION}, same train config "
+              f"{same_train}): {result_path}")
     out.mkdir(parents=True, exist_ok=True)
 
     slice_id = f"lh_p{args.patient:02d}"
@@ -290,6 +298,7 @@ def main() -> int:
         base["train"] = {k: summary[k] for k in (
             "best_loss", "best_step", "initial_loss", "final_loss", "train_loop_seconds",
             "validation_history", "cartridge_path")}
+        base["train_config"] = tr
         t = base["train"]
         val = t["validation_history"]
         print(f"[train] val loss {val[0]['validation_loss']:.4f} (step {val[0]['step']}) -> best "
