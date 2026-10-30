@@ -7,8 +7,16 @@ if [[ -n "$CUDA_MODULE" ]]; then
     module load "$CUDA_MODULE"
 fi
 
+# CARTRIDGES_ENV may be a conda env name, a conda env path, or a venv path.
+CARTRIDGES_ENV=${CARTRIDGES_ENV:-cartridges-env}
 eval "$(conda shell.bash hook)"
-conda activate "${CARTRIDGES_ENV:-$HOME/cartridges-env}"
+if [[ -f "$CARTRIDGES_ENV/bin/activate" && ! -d "$CARTRIDGES_ENV/conda-meta" ]]; then
+    source "$CARTRIDGES_ENV/bin/activate"
+elif ! conda activate "$CARTRIDGES_ENV"; then
+    echo "Could not activate '$CARTRIDGES_ENV'. Find it with: conda env list" >&2
+    echo "then: export CARTRIDGES_ENV=<name or path>  (and re-source this file)" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 export TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_$USER
 export VLLM_NO_USAGE_STATS=1
