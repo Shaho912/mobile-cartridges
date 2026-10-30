@@ -41,8 +41,8 @@ cartridge KV fit in 500 MB per chip and still answer well. Everything is set in
   exits with `does_not_fit` if anything exceeds the context window.
 - Totals exclude runtime activations, so they are lower bounds.
 
-On Betty, from the repo root (`/vast/parcc/sw/bin` on PATH, conda env `~/cartridges-env`;
-edit `slurm/sweep_env.sh` if the CUDA module name differs):
+On Betty, from the repo root (`/vast/parcc/sw/bin` on PATH, miniconda `base` env by default,
+override with `CARTRIDGES_ENV`; edit `slurm/sweep_env.sh` if the CUDA module name differs):
 
 ```bash
 # Gemma 3 is gated: request access on Hugging Face, then log in once.

@@ -8,7 +8,7 @@ if [[ -n "$CUDA_MODULE" ]]; then
 fi
 
 # CARTRIDGES_ENV may be a conda env name, a conda env path, or a venv path.
-CARTRIDGES_ENV=${CARTRIDGES_ENV:-cartridges-env}
+CARTRIDGES_ENV=${CARTRIDGES_ENV:-base}
 eval "$(conda shell.bash hook)"
 if [[ -f "$CARTRIDGES_ENV/bin/activate" && ! -d "$CARTRIDGES_ENV/conda-meta" ]]; then
     source "$CARTRIDGES_ENV/bin/activate"
