@@ -18,10 +18,12 @@ export CARTRIDGES_MODEL_ID=${CARTRIDGES_MODEL_ID:-Qwen/Qwen3-4B}
 PORT=${CARTRIDGES_VLLM_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")}
 API_KEY=cartridges-local
 
-python scripts/serve_vllm.py --model "$CARTRIDGES_MODEL_ID" --port "$PORT" \
+# Own process group, so cleanup also stops vLLM's EngineCore child, which otherwise keeps
+# the GPU and any stdout pipe (e.g. `| tee`) open after this script exits.
+setsid python scripts/serve_vllm.py --model "$CARTRIDGES_MODEL_ID" --port "$PORT" \
     --api-key "$API_KEY" --gpu-memory-utilization 0.85 &
 VLLM_PID=$!
-trap 'kill $VLLM_PID 2>/dev/null || true' EXIT
+trap 'kill -- -$VLLM_PID 2>/dev/null || true' EXIT
 
 for _ in $(seq 1 120); do
     if curl -sf -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:$PORT/v1/models" >/dev/null; then
