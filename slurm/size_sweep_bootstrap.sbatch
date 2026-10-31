@@ -14,7 +14,8 @@ set -u
 
 CONFIG=${SWEEP_CONFIG:-configs/size_sweep.yaml}
 export CARTRIDGES_MODEL_ID=${CARTRIDGES_MODEL_ID:-Qwen/Qwen3-4B}
-PORT=${CARTRIDGES_VLLM_PORT:-8000}
+# Free port by default: other jobs on a shared node may already hold 8000.
+PORT=${CARTRIDGES_VLLM_PORT:-$(python -c "import socket; s=socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")}
 API_KEY=cartridges-local
 
 python scripts/serve_vllm.py --model "$CARTRIDGES_MODEL_ID" --port "$PORT" \
@@ -35,4 +36,4 @@ done
 curl -sf -H "Authorization: Bearer $API_KEY" "http://127.0.0.1:$PORT/v1/models" >/dev/null \
     || { echo "vLLM server not ready after 20 minutes" >&2; exit 1; }
 
-python scripts/sweep_bootstrap.py --config "$CONFIG"
+python scripts/sweep_bootstrap.py --config "$CONFIG" --base-url "http://127.0.0.1:$PORT/v1"

@@ -33,6 +33,7 @@ def main() -> int:
     parser.add_argument("--config", default="configs/size_sweep.yaml")
     parser.add_argument("--eval-only", action="store_true", help="Write eval sets; skip vLLM.")
     parser.add_argument("--force", action="store_true", help="Regenerate existing bootstrap files.")
+    parser.add_argument("--base-url", help="vLLM server URL; overrides bootstrap.base_url.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -71,7 +72,7 @@ def main() -> int:
             corpus_text=text,
             eval_spec=[],
             output_path=out.with_suffix(".questions.txt"),
-            base_url=boot["base_url"],
+            base_url=args.base_url or boot["base_url"],
             api_key=boot["api_key"],
             num_questions=boot["count"],
             spread=boot.get("spread", False),
