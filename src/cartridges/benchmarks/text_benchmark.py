@@ -430,6 +430,11 @@ def generate_bootstrap_questions(
     finally:
         client.close()
 
+    if spread:
+        counts = sorted(per_passage)
+        print(f"[bootstrap] {len(generated)} questions over {len(passages)} passages "
+              f"(per passage min {counts[0]}, median {counts[len(counts) // 2]}, "
+              f"max {counts[-1]}; {len(exhausted)} ran out)", flush=True)
     minimum_questions = min(num_questions, max(20, num_questions // 2))
     if len(generated) < minimum_questions:
         raise RuntimeError(
