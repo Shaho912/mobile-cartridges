@@ -139,6 +139,42 @@ def test_score_uses_chosen_option(answer, choice, hit):
     assert s["choice"] == choice and s["choice_hit"] is hit
 
 
+class _StubClient:
+    """Answers each generation request with up to the requested number of new Q/A lines whose
+    answers are words from the passage in the prompt."""
+
+    def __init__(self, **_):
+        self.asked: dict[str, int] = {}
+
+    def chat(self, messages, **_):
+        import re
+        from types import SimpleNamespace
+        prompt = messages[-1]["content"]
+        passage = prompt.split("Passage:\n", 1)[1].split("\n\nRound", 1)[0]
+        n = int(re.search(r"Generate (\d+) distinct", prompt).group(1))
+        words = re.findall(r"w\d+_\d+", passage)
+        start = self.asked.get(passage, 0)
+        self.asked[passage] = start + n
+        lines = [f"What is item {w}? ||| {w}" for w in words[start:start + n]]
+        return SimpleNamespace(text="\n".join(lines))
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("spread", [False, True])
+def test_bootstrap_spread_covers_whole_corpus(monkeypatch, tmp_path, spread):
+    from cartridges.benchmarks import text_benchmark as tb
+    monkeypatch.setattr(tb, "VLLMClient", _StubClient)
+    corpus = "\n\n".join(" ".join(f"w{p}_{i}" for i in range(200)) for p in range(10))
+    out = tb.generate_bootstrap_questions(corpus_text=corpus, eval_spec=[],
+                                          output_path=tmp_path / "q.txt", base_url="x",
+                                          api_key="x", num_questions=100, spread=spread)
+    passages_hit = {e["expected_answer"].split("_")[0] for e in out}
+    assert len(out) == 100
+    assert len(passages_hit) == (10 if spread else 5)
+
+
 def test_score_wrong_label_with_right_text_is_wrong():
     record = {"questions": [{"question": "Q", "answer_a": "Mild paraparesis in the right leg",
                              "answer_b": "Mild paraparesis in the left leg", "correct":

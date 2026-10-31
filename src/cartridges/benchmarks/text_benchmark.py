@@ -320,11 +320,17 @@ def generate_bootstrap_questions(
     num_questions: int,
     batch_size: int = 20,
     max_rounds: int = 40,
+    spread: bool = False,
 ) -> list[dict[str, str]]:
     """Use the vLLM teacher to synthesize short factual Q/A pairs from the corpus.
 
     Each returned item has ``question`` and ``expected_answer``; the latter is the ANSWER
     half of a parsed ``QUESTION ||| ANSWER`` line (see ``_parse_question_answer_lines``).
+
+    By default passages are visited in order until ``num_questions`` is reached, so a small
+    count only covers the start of a long corpus. ``spread=True`` gives every passage an equal
+    quota (ceil(num_questions / passages)) and asks each passage for at most its remaining
+    quota per round, so questions cover the whole corpus.
     """
     forbidden = {item["query"].strip().lower() for item in eval_spec}
     client = VLLMClient(base_url=base_url, api_key=api_key)
@@ -333,6 +339,19 @@ def generate_bootstrap_questions(
     passages = _content_passages(corpus_text)
     if not passages:
         raise RuntimeError("Bootstrap question generation found no content passages.")
+    if spread:
+        # Merge neighbouring short passages (lab lines, headers) so each can carry a quota.
+        merged: list[str] = []
+        for passage in passages:
+            if merged and len(merged[-1]) < 1000:
+                merged[-1] = f"{merged[-1]}\n\n{passage}"
+            else:
+                merged.append(passage)
+        passages = merged
+    quota = -(-num_questions // len(passages)) if spread else num_questions
+    per_passage = [0] * len(passages)
+    exhausted: set[int] = set()
+    passage_questions: list[list[str]] = [[] for _ in passages]
     system_prompt = (
         "You generate factual question prompts for training a retrieval model. "
         "Do not emit <think> tags. Every question must be answerable directly from the provided "
@@ -346,9 +365,14 @@ def generate_bootstrap_questions(
             for passage_index, passage in enumerate(passages):
                 if len(generated) >= num_questions:
                     break
-                remaining = num_questions - len(generated)
+                remaining = min(num_questions - len(generated), quota - per_passage[passage_index])
+                if remaining <= 0 or passage_index in exhausted:
+                    continue
+                before = per_passage[passage_index]
                 prompt_batch_size = min(batch_size, max(4, remaining))
-                recent_seen = sorted(seen)[-20:]
+                # Spread mode asks a passage several times, so avoid that passage's own questions.
+                recent_seen = (passage_questions[passage_index][-40:] if spread
+                               else sorted(seen)[-20:])
                 # Feed a local passage instead of the full document so bootstrap questions stay
                 # grounded, cheap to generate, and easy to answer with copied text spans.
                 user_prompt = (
@@ -386,8 +410,12 @@ def generate_bootstrap_questions(
                             "expected_answer": answer,
                         }
                     )
-                    if len(generated) >= num_questions:
+                    per_passage[passage_index] += 1
+                    passage_questions[passage_index].append(question)
+                    if len(generated) >= num_questions or per_passage[passage_index] >= quota:
                         break
+                if spread and per_passage[passage_index] == before:
+                    exhausted.add(passage_index)
     finally:
         client.close()
 

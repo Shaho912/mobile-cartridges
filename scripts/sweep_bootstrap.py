@@ -74,6 +74,7 @@ def main() -> int:
             base_url=boot["base_url"],
             api_key=boot["api_key"],
             num_questions=boot["count"],
+            spread=boot.get("spread", False),
         )
         out.write_text(json.dumps({
             "patient": p,

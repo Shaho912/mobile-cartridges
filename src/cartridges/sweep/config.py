@@ -20,11 +20,22 @@ def run_dir(cfg: dict, model_id: str, quant: str, tag: str, patient: int) -> Pat
     return cfg["output_root"] / "runs" / model_slug(model_id) / quant / tag / f"lh_p{patient:02d}"
 
 
+def bootstrap_tag(cfg: dict) -> str:
+    """Names the bootstrap set; the original (in-order, 120 questions) set has no tag."""
+    boot = cfg["bootstrap"]
+    if not boot.get("spread"):
+        return ""
+    return f"spread_n{boot['count']}"
+
+
 def bootstrap_path(cfg: dict, patient: int) -> Path:
-    return cfg["output_root"] / "bootstrap" / f"lh_p{patient:02d}.json"
+    root = cfg["output_root"] / "bootstrap"
+    tag = bootstrap_tag(cfg)
+    return (root / tag if tag else root) / f"lh_p{patient:02d}.json"
 
 
 def supervision_path(cfg: dict, model_id: str, quant: str, patient: int) -> Path:
     group = f"_g{cfg['quant_group_size']}" if quant != "bf16" else ""
-    name = f"{quant}{group}_teacher-{cfg['teacher']}"
+    tag = bootstrap_tag(cfg)
+    name = f"{quant}{group}_teacher-{cfg['teacher']}" + (f"_{tag}" if tag else "")
     return cfg["output_root"] / "supervision" / model_slug(model_id) / name / f"lh_p{patient:02d}.jsonl"

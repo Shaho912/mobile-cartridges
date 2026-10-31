@@ -23,10 +23,13 @@ bootstrap:
   vllm_model: Qwen/Qwen3-4B
   base_url: http://127.0.0.1:8000/v1
   api_key: cartridges-local
-  count: 120
+  count: 1000
+  # spread: equal questions per passage across the whole record. The original in-order set
+  # (120 questions, outputs/size_sweep/bootstrap/lh_pXX.json) covered mostly the first ~15%.
+  spread: true
 
 train:
-  steps: 600                # p01 int4 g64 s1024: held-out val loss bottoms out near step 360
+  steps: 2000               # ceiling; best held-out val checkpoint is kept (~2 passes over 1000 q)
   learning_rate: 3.0e-3
   top_logprobs: 5
   num_frozen_tokens: 1

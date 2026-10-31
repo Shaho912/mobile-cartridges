@@ -42,6 +42,7 @@ from cartridges.core import TrainableKVCartridge  # noqa: E402
 from cartridges.sweep.budget import MB  # noqa: E402
 from cartridges.sweep.config import (  # noqa: E402
     bootstrap_path,
+    bootstrap_tag,
     load_config,
     run_dir,
     supervision_path,
@@ -120,6 +121,12 @@ def _row(base: dict, kv: str, records: list[dict], weight_bytes: int, kv_bytes: 
     }
 
 
+def _train_config(cfg: dict) -> dict:
+    """Everything that changes a trained cartridge; a stored result with another value reruns."""
+    tag = bootstrap_tag(cfg)
+    return {**cfg["train"], **({"bootstrap": tag} if tag else {})}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", default="configs/size_sweep.yaml")
@@ -156,7 +163,7 @@ def main() -> int:
         previous = json.loads(result_path.read_text(encoding="utf-8"))
         status = previous.get("status")
         same_train = args.mode != "cartridge" or status != "ok" \
-            or previous["rows"][0].get("train_config") == cfg["train"]
+            or previous["rows"][0].get("train_config") == _train_config(cfg)
         if status in ("ok", "does_not_fit") and previous.get("eval_version") == EVAL_VERSION \
                 and same_train:
             print(f"Already done ({status}): {result_path}")
@@ -298,7 +305,7 @@ def main() -> int:
         base["train"] = {k: summary[k] for k in (
             "best_loss", "best_step", "initial_loss", "final_loss", "train_loop_seconds",
             "validation_history", "cartridge_path")}
-        base["train_config"] = tr
+        base["train_config"] = _train_config(cfg)
         t = base["train"]
         val = t["validation_history"]
         print(f"[train] val loss {val[0]['validation_loss']:.4f} (step {val[0]['step']}) -> best "
