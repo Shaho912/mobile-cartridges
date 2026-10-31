@@ -38,6 +38,7 @@ train:
   validation_interval: 10
   holdout_validation: true  # the 16 validation questions are excluded from training
   init_baseline: true       # also run each slot count untrained (1 step), tag s<N>_init
+  target_format: qa         # qa: short answer; mcq: same questions as five-option eval items
   seed: 0
   keep_checkpoints: false   # keep only the best cartridge per run
 

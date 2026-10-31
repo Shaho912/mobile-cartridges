@@ -175,7 +175,13 @@ def _trained_vs_init(rows: list[dict]) -> list[str]:
     for r in rows:
         if r["mode"] != "cartridge" or r["tag"].endswith("_init"):
             continue
-        ref = init.get((r["model"], r["quant_label"], r["patient"], r["kv_precision"], r["tag"]))
+        # Variant tags (s1024_mcq, s1024_mcq_lr3e-4) fall back to the base tag's init run.
+        key, tag, ref = (r["model"], r["quant_label"], r["patient"], r["kv_precision"]), r["tag"], None
+        while ref is None:
+            ref = init.get((*key, tag))
+            if "_" not in tag:
+                break
+            tag = tag.rsplit("_", 1)[0]
         if ref is None:
             continue
         ref_hit = {q["id"]: q["choice_hit"] for q in ref["questions"]}

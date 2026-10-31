@@ -52,6 +52,7 @@ from cartridges.sweep.longhealth import (  # noqa: E402
     EVAL_VERSION,
     eval_items,
     load_benchmark,
+    mcq_training_records,
     patient_record,
     patient_text,
     score,
@@ -124,7 +125,10 @@ def _row(base: dict, kv: str, records: list[dict], weight_bytes: int, kv_bytes: 
 def _train_config(cfg: dict) -> dict:
     """Everything that changes a trained cartridge; a stored result with another value reruns."""
     tag = bootstrap_tag(cfg)
-    return {**cfg["train"], **({"bootstrap": tag} if tag else {})}
+    train = {**cfg["train"], **({"bootstrap": tag} if tag else {})}
+    if train.get("target_format") == "qa":  # the default; results from before the key match
+        del train["target_format"]
+    return train
 
 
 def main() -> int:
@@ -142,6 +146,10 @@ def main() -> int:
                         help="Override quant_group_size (quantized runs go to <quant>_g<N>/).")
     parser.add_argument("--train-steps", type=int, default=None,
                         help="Override train.steps (1 = prefix-initialized cartridge, untrained).")
+    parser.add_argument("--lr", type=float, default=None, help="Override train.learning_rate.")
+    parser.add_argument("--target-format", choices=["qa", "mcq"], default=None,
+                        help="Override train.target_format: qa = short answer, mcq = bootstrap "
+                             "questions as five-option items in the eval format.")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -154,6 +162,10 @@ def main() -> int:
         cfg["quant_group_size"] = args.quant_group_size
     if args.train_steps:
         cfg["train"]["steps"] = args.train_steps
+    if args.lr:
+        cfg["train"]["learning_rate"] = args.lr
+    if args.target_format:
+        cfg["train"]["target_format"] = args.target_format
     # Group size is always in the directory name, so changing the default never mixes sizes.
     quant_dir = args.quant if args.quant == "bf16" else f"{args.quant}_g{cfg['quant_group_size']}"
     tag = args.mode if args.mode != "cartridge" else (args.slot_tag or f"s{args.slots}")
@@ -213,13 +225,16 @@ def main() -> int:
         if not boot_file.exists():
             raise SystemExit(f"Missing {boot_file}. Run scripts/sweep_bootstrap.py first.")
         boot = json.loads(boot_file.read_text(encoding="utf-8"))
-        answer_records = [
-            {"question": ex["question"].strip(),
-             "user_message": f"{ex['question'].strip()}\n\n{BOOTSTRAP_ANSWER_PROMPT}",
-             "assistant_text": ex["expected_answer"].strip(),
-             "expected_answer": ex["expected_answer"].strip()}
-            for ex in boot["examples"]
-        ]
+        if cfg["train"].get("target_format", "qa") == "mcq":
+            answer_records = mcq_training_records(boot["examples"], seed=cfg["train"]["seed"])
+        else:
+            answer_records = [
+                {"question": ex["question"].strip(),
+                 "user_message": f"{ex['question'].strip()}\n\n{BOOTSTRAP_ANSWER_PROMPT}",
+                 "assistant_text": ex["expected_answer"].strip(),
+                 "expected_answer": ex["expected_answer"].strip()}
+                for ex in boot["examples"]
+            ]
         longest_user = max(answer_records, key=lambda r: len(r["user_message"]))["user_message"]
         longest_target = max(
             len(tokenizer.encode(r["assistant_text"], add_special_tokens=False)) + 1

@@ -37,5 +37,7 @@ def bootstrap_path(cfg: dict, patient: int) -> Path:
 def supervision_path(cfg: dict, model_id: str, quant: str, patient: int) -> Path:
     group = f"_g{cfg['quant_group_size']}" if quant != "bf16" else ""
     tag = bootstrap_tag(cfg)
-    name = f"{quant}{group}_teacher-{cfg['teacher']}" + (f"_{tag}" if tag else "")
+    fmt = cfg["train"].get("target_format", "qa")
+    name = (f"{quant}{group}_teacher-{cfg['teacher']}" + (f"_{tag}" if tag else "")
+            + (f"_{fmt}" if fmt != "qa" else ""))
     return cfg["output_root"] / "supervision" / model_slug(model_id) / name / f"lh_p{patient:02d}.jsonl"

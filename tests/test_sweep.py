@@ -193,3 +193,29 @@ def test_score_wrong_label_with_right_text_is_wrong():
                              "Mild paraparesis in the left leg"}]}
     s = score("**A) Mild paraparesis in the left leg**", eval_items(record, 1)[0])
     assert s["choice"] == "A" and not s["choice_hit"] and s["substring_hit"]
+
+
+def test_mcq_training_records_match_eval_format():
+    from cartridges.sweep.longhealth import ANSWER_INSTRUCTION, mcq_training_records
+    examples = [{"question": f"Dose {i}?", "expected_answer": f"{i}.5 mg"} for i in range(10)]
+    examples += [{"question": f"Drug {i}?", "expected_answer": f"Drug{chr(65 + i)}"} for i in range(10)]
+    records = mcq_training_records(examples, seed=0)
+    assert len(records) == 20
+    letters = set()
+    for ex, rec in zip(examples, records, strict=True):
+        lines = rec["user_message"].split("\n")
+        assert lines[0] == ex["question"] and rec["user_message"].endswith(ANSWER_INSTRUCTION)
+        options = dict(line.split(") ", 1) for line in lines[1:6])
+        assert list(options) == ["A", "B", "C", "D", "E"]
+        assert len({v.lower() for v in options.values()}) == 5
+        letter = rec["assistant_text"].split(")")[0]
+        assert options[letter] == ex["expected_answer"]
+        # distractors share the answer's numeric / non-numeric kind
+        digit = any(c.isdigit() for c in ex["expected_answer"])
+        assert all(any(c.isdigit() for c in v) == digit for v in options.values())
+        item = {"options": {k: v.lower() for k, v in options.items()},
+                "correct_text": ex["expected_answer"].lower(), "correct_letter": letter}
+        assert score(rec["assistant_text"], item)["choice_hit"]
+        letters.add(letter)
+    assert len(letters) >= 4
+    assert records == mcq_training_records(examples, seed=0)

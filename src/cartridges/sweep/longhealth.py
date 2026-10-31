@@ -63,6 +63,46 @@ def eval_items(record: dict, patient: int, limit: int | None = None) -> list[dic
     return items
 
 
+def mcq_training_records(examples: list[dict], seed: int = 0) -> list[dict]:
+    """Bootstrap Q/A pairs as five-option questions in the exact eval prompt format.
+
+    Distractors are four other answers from the same set, closest in length and with the same
+    numeric / non-numeric kind (so "1.8g" competes with doses, not with drug names). The
+    correct option's letter is drawn uniformly. Target is "<letter>) <answer>".
+    """
+    import math
+    import random
+
+    rng = random.Random(seed)
+    answers = [ex["expected_answer"].strip() for ex in examples]
+    has_digit = [any(c.isdigit() for c in a) for a in answers]
+    records = []
+    for i, ex in enumerate(examples):
+        answer = answers[i]
+        seen = {answer.lower()}
+        candidates = []
+        for j in rng.sample(range(len(answers)), len(answers)):
+            other = answers[j]
+            if other.lower() in seen:
+                continue
+            seen.add(other.lower())
+            distance = abs(math.log((len(other) + 1) / (len(answer) + 1)))
+            candidates.append((has_digit[j] != has_digit[i], distance, other))
+        candidates.sort(key=lambda c: c[:2])
+        options = [c[2] for c in candidates[:len(_LETTERS) - 1]]
+        if len(options) < len(_LETTERS) - 1:
+            raise ValueError(f"Need {len(_LETTERS)} distinct bootstrap answers for MCQ records.")
+        correct = rng.randrange(len(_LETTERS))
+        options.insert(correct, answer)
+        question = ex["question"].strip()
+        opts = "\n".join(f"{k}) {v}" for k, v in zip(_LETTERS, options, strict=True))
+        target = f"{_LETTERS[correct]}) {answer}"
+        records.append({"question": question,
+                        "user_message": f"{question}\n{opts}\n\n{ANSWER_INSTRUCTION}",
+                        "assistant_text": target, "expected_answer": target})
+    return records
+
+
 def chosen_option(answer: str, options: dict[str, str]) -> str | None:
     """The single option the answer commits to, or None.
 
