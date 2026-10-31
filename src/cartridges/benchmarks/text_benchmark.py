@@ -329,8 +329,9 @@ def generate_bootstrap_questions(
 
     By default passages are visited in order until ``num_questions`` is reached, so a small
     count only covers the start of a long corpus. ``spread=True`` gives every passage an equal
-    quota (ceil(num_questions / passages)) and asks each passage for at most its remaining
-    quota per round, so questions cover the whole corpus.
+    quota and asks each passage for at most its remaining quota per round, so questions cover
+    the whole corpus. A passage that yields nothing new for two rounds in a row is exhausted,
+    and its unused share is split over the passages still producing.
     """
     forbidden = {item["query"].strip().lower() for item in eval_spec}
     client = VLLMClient(base_url=base_url, api_key=api_key)
@@ -350,6 +351,7 @@ def generate_bootstrap_questions(
         passages = merged
     quota = -(-num_questions // len(passages)) if spread else num_questions
     per_passage = [0] * len(passages)
+    empty_rounds = [0] * len(passages)
     exhausted: set[int] = set()
     passage_questions: list[list[str]] = [[] for _ in passages]
     system_prompt = (
@@ -362,6 +364,12 @@ def generate_bootstrap_questions(
         for round_index in range(max_rounds):
             if len(generated) >= num_questions:
                 break
+            if spread:
+                active = len(passages) - len(exhausted)
+                if active == 0:
+                    break
+                spent = sum(per_passage[i] for i in exhausted)
+                quota = -(-(num_questions - spent) // active)
             for passage_index, passage in enumerate(passages):
                 if len(generated) >= num_questions:
                     break
@@ -414,8 +422,11 @@ def generate_bootstrap_questions(
                     passage_questions[passage_index].append(question)
                     if len(generated) >= num_questions or per_passage[passage_index] >= quota:
                         break
-                if spread and per_passage[passage_index] == before:
-                    exhausted.add(passage_index)
+                if spread:
+                    empty_rounds[passage_index] = (empty_rounds[passage_index] + 1
+                                                   if per_passage[passage_index] == before else 0)
+                    if empty_rounds[passage_index] >= 2:
+                        exhausted.add(passage_index)
     finally:
         client.close()
 

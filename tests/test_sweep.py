@@ -175,6 +175,18 @@ def test_bootstrap_spread_covers_whole_corpus(monkeypatch, tmp_path, spread):
     assert len(passages_hit) == (10 if spread else 5)
 
 
+def test_bootstrap_spread_redistributes_from_thin_passages(monkeypatch, tmp_path):
+    from cartridges.benchmarks import text_benchmark as tb
+    monkeypatch.setattr(tb, "VLLMClient", _StubClient)
+    rich = [" ".join(f"w{p}_{i}" for i in range(200)) for p in range(5)]
+    thin = [" ".join([f"w{p}_{i}" for i in range(3)] + ["filler"] * 200) for p in range(5, 10)]
+    out = tb.generate_bootstrap_questions(corpus_text="\n\n".join(rich + thin), eval_spec=[],
+                                          output_path=tmp_path / "q.txt", base_url="x",
+                                          api_key="x", num_questions=100, spread=True)
+    assert len(out) == 100
+    assert len({e["expected_answer"].split("_")[0] for e in out}) == 10
+
+
 def test_score_wrong_label_with_right_text_is_wrong():
     record = {"questions": [{"question": "Q", "answer_a": "Mild paraparesis in the right leg",
                              "answer_b": "Mild paraparesis in the left leg", "correct":
