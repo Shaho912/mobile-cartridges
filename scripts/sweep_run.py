@@ -126,6 +126,8 @@ def _train_config(cfg: dict) -> dict:
     """Everything that changes a trained cartridge; a stored result with another value reruns."""
     tag = bootstrap_tag(cfg)
     train = {**cfg["train"], **({"bootstrap": tag} if tag else {})}
+    if cfg["teacher"] != "self":
+        train["teacher"] = cfg["teacher"]
     if train.get("target_format") == "qa":  # the default; results from before the key match
         del train["target_format"]
     return train
@@ -150,6 +152,9 @@ def main() -> int:
     parser.add_argument("--target-format", choices=["qa", "mcq"], default=None,
                         help="Override train.target_format: qa = short answer, mcq = bootstrap "
                              "questions as five-option items in the eval format.")
+    parser.add_argument("--teacher", default=None,
+                        help="Override teacher: 'self' (the same quantized model) or a model id "
+                             "with the same tokenizer, loaded in bf16 (e.g. Qwen/Qwen3-8B).")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -166,6 +171,8 @@ def main() -> int:
         cfg["train"]["learning_rate"] = args.lr
     if args.target_format:
         cfg["train"]["target_format"] = args.target_format
+    if args.teacher:
+        cfg["teacher"] = args.teacher
     # Group size is always in the directory name, so changing the default never mixes sizes.
     quant_dir = args.quant if args.quant == "bf16" else f"{args.quant}_g{cfg['quant_group_size']}"
     tag = args.mode if args.mode != "cartridge" else (args.slot_tag or f"s{args.slots}")
@@ -242,9 +249,15 @@ def main() -> int:
         )
         need = len(adapter.chat_ids([sys_msg, {"role": "user", "content": longest_user}])) \
             + longest_target
-        if need > limit:
+        if cfg["teacher"] != "self":
+            limit_teacher = attention_info(cfg["teacher"])["max_position_embeddings"]
+            if AutoTokenizer.from_pretrained(cfg["teacher"]).get_vocab() != tokenizer.get_vocab():
+                raise SystemExit(f"Teacher {cfg['teacher']} tokenizer differs from {args.model}.")
+        else:
+            limit_teacher = limit
+        if need > min(limit, limit_teacher):
             return _fail_fit(result_path, base, "teacher prompt (full record + bootstrap question)",
-                             need, limit)
+                             need, min(limit, limit_teacher))
         doc_tokens = adapter.num_text_tokens(adapter.init_text(system_prompt))
         base["doc_tokens"] = doc_tokens
         if args.slots > doc_tokens:
@@ -294,12 +307,21 @@ def main() -> int:
             sup.parent.mkdir(parents=True, exist_ok=True)
             tmp = sup.with_name(f"{sup.name}.tmp{os.getpid()}")
             t0 = time.perf_counter()
+            teacher = model
+            if cfg["teacher"] != "self":
+                # Separate full-precision teacher; only the student counts toward the budget.
+                teacher, _, _ = load_model(cfg["teacher"], "bf16", cfg["quant_group_size"],
+                                           args.device)
+                print(f"[teacher] {cfg['teacher']} bf16 with the full record in context")
             build_training_dataset(
                 corpus_text=text, slice_id=slice_id, answer_records=answer_records,
                 output_path=tmp, device=args.device, top_logprobs=cfg["train"]["top_logprobs"],
-                model=model, tokenizer=tokenizer, eos_token_id=adapter.turn_end_id,
+                model=teacher, tokenizer=tokenizer, eos_token_id=adapter.turn_end_id,
                 chat_prompt_ids=adapter.chat_ids,
             )
+            if teacher is not model:
+                del teacher
+                torch.cuda.empty_cache()
             os.replace(tmp, sup)
             base["supervision_seconds"] = time.perf_counter() - t0
         base["supervision_path"] = str(sup)
